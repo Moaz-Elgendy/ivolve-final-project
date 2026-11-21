@@ -1,0 +1,79 @@
+{{- if .Values.networkPolicy.enabled }}
+# Deny all ingress to every pod in the namespace, then open only the paths the app needs.
+# (Egress is left open: pods need DNS and the Vault Agent must reach Vault.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# frontend: from the internet (LoadBalancer) on its port
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "frontend" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: {{ .Values.frontend.port }}
+---
+# auth: only from frontend
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-auth-from-frontend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "auth" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ivolve.selector" (dict "name" "frontend" "root" .) | nindent 14 }}
+      ports:
+        - port: {{ .Values.auth.port }}
+---
+# roadmap: only from frontend
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-roadmap-from-frontend
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "roadmap" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ivolve.selector" (dict "name" "frontend" "root" .) | nindent 14 }}
+      ports:
+        - port: {{ .Values.roadmap.port }}
+---
+# mysql: only from auth
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mysql-from-auth
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "mysql" "root" .) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ivolve.selector" (dict "name" "auth" "root" .) | nindent 14 }}
+      ports:
+        - port: 3306
+{{- end }}

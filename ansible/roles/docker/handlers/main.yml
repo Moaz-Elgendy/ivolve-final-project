@@ -1,0 +1,7 @@
+---
+# Jenkins must restart to pick up the new docker group membership
+- name: Restart Jenkins if present
+  ansible.builtin.systemd_service:
+    name: jenkins
+    state: restarted
+  failed_when: false

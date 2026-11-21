@@ -1,0 +1,3 @@
+ivolve deployed in namespace {{ .Release.Namespace }}.
+Frontend URL (wait for the load balancer):
+  kubectl -n {{ .Release.Namespace }} get svc frontend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'

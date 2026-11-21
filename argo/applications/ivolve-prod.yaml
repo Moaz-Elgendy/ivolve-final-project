@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ivolve-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Moaz-Elgendy/ivolve-final-project.git
+    targetRevision: prod          # the branch this environment follows
+    path: helm/ivolve
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+      parameters:
+        # Filled in at apply time so the AWS account ID is not in git:
+        #   export ECR_REGISTRY=<account>.dkr.ecr.eu-west-1.amazonaws.com
+        #   envsubst < argo/applications/ivolve-prod.yaml | kubectl apply -f -
+        - name: registry
+          value: ${ECR_REGISTRY}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ivolve-prod
+  # no automated sync: prod is synced by hand
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

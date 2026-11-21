@@ -1,0 +1,12 @@
+---
+plugin: amazon.aws.aws_ec2
+regions:
+  - eu-west-1
+filters:
+  # Terraform creates exactly one instance with this name: the shared Jenkins host
+  tag:Name: ivolve-ec2-instance
+  instance-state-name: running
+hostnames:
+  - ip-address
+groups:
+  jenkins: true

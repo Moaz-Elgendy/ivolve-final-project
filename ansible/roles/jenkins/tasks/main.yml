@@ -1,0 +1,36 @@
+---
+- name: Install Java
+  ansible.builtin.dnf:
+    name: "{{ java_package }}"
+    state: present
+
+# The pipeline's checkout and push steps shell out to git
+- name: Install git
+  ansible.builtin.dnf:
+    name: git
+    state: present
+
+- name: Import Jenkins repo GPG key
+  ansible.builtin.rpm_key:
+    key: "{{ jenkins_repo_key }}"
+    state: present
+
+- name: Add Jenkins repo
+  ansible.builtin.yum_repository:
+    name: jenkins
+    description: Jenkins-stable
+    baseurl: "{{ jenkins_repo_url }}"
+    gpgcheck: true
+    gpgkey: "{{ jenkins_repo_key }}"
+    enabled: true
+
+- name: Install Jenkins
+  ansible.builtin.dnf:
+    name: jenkins
+    state: present
+
+- name: Enable and start Jenkins
+  ansible.builtin.systemd_service:
+    name: jenkins
+    enabled: true
+    state: started

@@ -1,0 +1,7 @@
+---
+# Release rpm is not GPG-signed, so the signature check is skipped
+- name: Install Trivy
+  ansible.builtin.dnf:
+    name: "{{ trivy_rpm_url }}"
+    state: present
+    disable_gpg_check: true

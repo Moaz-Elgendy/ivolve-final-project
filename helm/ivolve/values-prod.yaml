@@ -1,0 +1,4 @@
+# Per-environment overrides for the prod branch
+environment: prod
+# Placeholder until the first Jenkins run; Jenkins then rewrites this line with the build number
+imageTag: "0"

@@ -1,0 +1,70 @@
+services:
+  app:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - AUTH_SERVICE_URL=http://auth:5000
+      - ROADMAP_SERVICE_URL=http://roadmap:8080
+      - SESSION_SECRET=${SESSION_SECRET:-change-me}
+    networks:
+      - app-auth
+      - app-roadmap
+    ports:
+      - "3000:3000"
+    depends_on:
+      - auth
+      - roadmap
+
+  auth:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-ivolve}
+      - DB_USER=${DB_USER:-ivolve}
+      - DB_PASSWORD=${DB_PASSWORD:-ivolve}
+    networks:
+      - app-auth
+      - db-auth
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-ivolve}
+      - MYSQL_DATABASE=${DB_NAME:-ivolve}
+      - MYSQL_USER=${DB_USER:-ivolve}
+      - MYSQL_PASSWORD=${DB_PASSWORD:-ivolve}
+    networks:
+      - db-auth
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  roadmap:
+    build:
+      context: ./roadmap-service
+      dockerfile: Dockerfile
+    networks:
+      - app-roadmap
+
+networks:
+  app-auth:
+    driver: bridge
+  db-auth:
+    driver: bridge
+  app-roadmap:
+    driver: bridge
+
+volumes:
+  db-data:
+    driver: local

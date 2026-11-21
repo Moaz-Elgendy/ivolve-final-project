@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  labels:
+    {{- include "ivolve.labels" (dict "name" "auth" "root" .) | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.auth.port }}
+  selector:
+    {{- include "ivolve.selector" (dict "name" "auth" "root" .) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  labels:
+    {{- include "ivolve.labels" (dict "name" "auth" "root" .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.auth.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "auth" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ivolve.labels" (dict "name" "auth" "root" .) | nindent 8 }}
+      {{- if .Values.vault.enabled }}
+      annotations:
+        {{- include "ivolve.vaultAnnotations" (dict "root" . "file" "db" "path" .Values.vault.dbSecretPath "template" .Values.vault.dbTemplate) | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: auth
+      containers:
+        - name: auth
+          image: {{ include "ivolve.image" (dict "name" .Values.auth.image "root" .) | quote }}
+          command: ["sh", "-c", ". /vault/secrets/db && exec gunicorn --bind 0.0.0.0:{{ .Values.auth.port }} --workers 2 app:app"]
+          env:
+            - name: DB_HOST
+              value: {{ .Values.db.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.db.port | quote }}
+          ports:
+            - containerPort: {{ .Values.auth.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.auth.port }}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.auth.port }}
+            initialDelaySeconds: 20
+          securityContext:
+            {{- include "ivolve.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}

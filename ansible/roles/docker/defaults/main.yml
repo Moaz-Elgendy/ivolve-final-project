@@ -1,0 +1,4 @@
+---
+# Users added to the docker group; the jenkins user lets pipelines run docker
+docker_users:
+  - jenkins

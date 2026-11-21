@@ -1,0 +1,14 @@
+.terraform
+helm/vault/vault-init.json
+
+# Machine/account specific values (account ID, public IP) and state
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+terraform/backend.hcl
+*.tfstate
+*.tfstate.*
+
+# Local tooling
+.claude/
+.serena/
+graphify-out/

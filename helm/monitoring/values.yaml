@@ -1,0 +1,24 @@
+# kube-prometheus-stack overrides (everything else uses chart defaults)
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+grafana:
+  service:
+    type: ClusterIP   # reach it with kubectl port-forward
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 2Gi
+  # Set the admin password at install time: --set grafana.adminPassword=...
+
+alertmanager:
+  enabled: false

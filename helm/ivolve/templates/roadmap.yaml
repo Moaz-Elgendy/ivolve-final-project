@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: roadmap
+  labels:
+    {{- include "ivolve.labels" (dict "name" "roadmap" "root" .) | nindent 4 }}
+spec:
+  ports:
+    - port: {{ .Values.roadmap.port }}
+  selector:
+    {{- include "ivolve.selector" (dict "name" "roadmap" "root" .) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roadmap
+  labels:
+    {{- include "ivolve.labels" (dict "name" "roadmap" "root" .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.roadmap.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ivolve.selector" (dict "name" "roadmap" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ivolve.labels" (dict "name" "roadmap" "root" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: roadmap
+          image: {{ include "ivolve.image" (dict "name" .Values.roadmap.image "root" .) | quote }}
+          ports:
+            - containerPort: {{ .Values.roadmap.port }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.roadmap.port }}
+            initialDelaySeconds: 20
+          securityContext:
+            {{- include "ivolve.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.roadmap.resources | nindent 12 }}

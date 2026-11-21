@@ -1,0 +1,8 @@
+# Per-environment overrides for the dev branch
+environment: dev
+# Placeholder until the first Jenkins run; Jenkins then rewrites this line with the build number
+imageTag: "0"
+# One cluster hosts all environments; keep the non-prod ones small
+frontend: {replicas: 1}
+auth: {replicas: 1}
+roadmap: {replicas: 1}

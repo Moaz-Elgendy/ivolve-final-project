@@ -1,0 +1,37 @@
+# hashicorp/vault chart overrides
+server:
+  standalone:
+    enabled: true          # one pod, file storage on a gp3 volume
+    # Same as the chart default config plus an awskms seal: Vault unseals itself after every
+    # restart using the KMS key from Terraform. The key ID is passed at install time:
+    #   --set server.extraEnvironmentVars.VAULT_AWSKMS_SEAL_KEY_ID=$(terraform output -raw vault_kms_key_id)
+    # AWS credentials come from EKS Pod Identity (vault/vault service account, see Terraform).
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      storage "file" {
+        path = "/vault/data"
+      }
+
+      seal "awskms" {}
+  extraEnvironmentVars:
+    AWS_REGION: eu-west-1
+  dataStorage:
+    enabled: true
+    size: 2Gi
+    storageClass: gp3
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+
+injector:
+  enabled: true            # the mutating webhook that adds the Vault Agent sidecar
+
+ui:
+  enabled: true            # service stays ClusterIP; use port-forward
