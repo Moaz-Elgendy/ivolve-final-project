@@ -26,7 +26,6 @@
 9. [Component reference](#9-component-reference)
 10. [What stays out of git](#10-what-stays-out-of-git)
 11. [Deployment runbook](#11-deployment-runbook)
-12. [Review status and open items](#12-review-status-and-open-items)
 
 ---
 
@@ -499,56 +498,21 @@ Prerequisites: AWS CLI with credentials, Terraform >= 1.10, Ansible with the `am
    helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring \
      --create-namespace -f helm/monitoring/values.yaml --set grafana.adminPassword=...
    ```
-7. **Argo CD** (install command is the upstream one; it is not stored in this repo)
+7. **Lint the chart** before Argo can sync it (needs helm; it was not linted where it was written)
+   ```bash
+   export ECR_REGISTRY=<account-id>.dkr.ecr.eu-west-1.amazonaws.com
+   helm lint helm/ivolve -f helm/ivolve/values-dev.yaml --set registry=$ECR_REGISTRY
+   helm template ivolve helm/ivolve -f helm/ivolve/values-dev.yaml --set registry=$ECR_REGISTRY > /dev/null
+   ```
+8. **Argo CD** (install command is the upstream one; it is not stored in this repo)
    ```bash
    kubectl create namespace argocd
    kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-   export ECR_REGISTRY=<account-id>.dkr.ecr.eu-west-1.amazonaws.com
    for e in dev stg prod; do envsubst < argo/applications/ivolve-$e.yaml | kubectl apply -f -; done
    ```
-8. **First release**: run the Jenkins job with `ENV=dev`, then `stg`, then `prod`. Each run pushes `*-<env>:<build>` and updates `values-<env>.yaml`. Argo syncs dev and stg itself; sync prod by hand in the Argo UI or `argocd app sync ivolve-prod`.
-9. **Get a URL**
+9. **First release**: run the Jenkins job with `ENV=dev`, then `stg`, then `prod`. Each run pushes `*-<env>:<build>` and updates `values-<env>.yaml`. Argo syncs dev and stg itself; sync prod by hand in the Argo UI or `argocd app sync ivolve-prod`.
+10. **Get a URL**
    ```bash
    kubectl -n ivolve-dev get svc frontend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
    ```
-10. **Grafana**: `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80`.
-
----
-
-## 12. Review status and open items
-
-Checks run: `terraform fmt` (clean), `terraform validate` (valid), `ansible-playbook --syntax-check` (OK), an `envsubst` render of an Argo Application, and the Jenkins `sed` line on a sample file. **Not run:** `helm lint` / `helm template` (helm is not installed here), the Jenkinsfile in a real Jenkins, `terraform plan/apply`, Argo sync.
-
-### Fixed
-
-| Earlier finding | Now |
-| --- | --- |
-| ECR names did not match the pipeline | One ECR, repos `<service>-<env>`; Jenkinsfile and chart build the same names |
-| Three clusters, one Argo target | One cluster, one Argo CD, namespaces `ivolve-dev/stg/prod` |
-| Jenkins host per env, `t3.micro` | One Jenkins host, `t3.small`, 30 GiB disk, UI port 8080 open to your IP |
-| Ansible found only the default stack | One tagged instance, one match |
-| Random logouts with 2 replicas | `sessionAffinity: ClientIP` on the frontend Service |
-| Vault re-sealed on restart | KMS auto-unseal (Terraform key + Pod Identity role) |
-| No `git` on the Jenkins host | `jenkins` role installs it |
-| Argo/Jenkins over SSH to a public repo | https everywhere; one token credential only for the `imageTag` push |
-| `imageTag: latest` | Jenkins build number (placeholder `"0"` before the first run) |
-| No limits, no network policies | Limits on every pod; ingress NetworkPolicies; VPC CNI enforcement on |
-| Unused `modules/sg`, stale `variables.tfvars` | Removed |
-| IP and account ID in tracked files and in git history | Moved to git-ignored files or computed at run time (section 10); history recreated from scratch |
-| MySQL fails on a fresh EBS volume (`lost+found`) | PVC mounted with `subPath: mysql` |
-| Flask development server; `CREATE TABLE` on every request | gunicorn; table created once per worker |
-| Containers run as root | Non-root numeric UIDs; `securityContext` in the chart |
-| Session cookie sent cross-site | `sameSite: lax` (the `secure` flag needs HTTPS, see below) |
-| Trivy blocked on unfixable CVEs | `--ignore-unfixed` |
-| Capacity on one 2-node cluster | dev and stg run 1 replica each |
-| Stray `stf` branch | Deleted; branches are `main`, `dev`, `stg`, `prod` |
-
-### Still open
-
-| # | Item | Notes |
-| --- | --- | --- |
-| 1 | Helm chart not rendered or linted here | Run `helm lint helm/ivolve -f helm/ivolve/values-dev.yaml --set registry=x` and `helm template` once before the first sync. |
-| 2 | Frontend is plain HTTP on a public LoadBalancer, one per environment | Needs a domain and an ACM certificate; then set the cookie `secure` flag. No CSRF protection or login rate limit yet. |
-| 3 | One NAT gateway, permissive NACL, fixed 2-node group, egress not restricted by NetworkPolicy | Fine for a lab. |
-| 4 | `ssh host_key_checking = False`, Trivy rpm installed without GPG check | Acceptable for a lab. |
-| 5 | MySQL container still runs as root | Its entrypoint needs it to drop privileges itself. |
+11. **Grafana**: `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80`.

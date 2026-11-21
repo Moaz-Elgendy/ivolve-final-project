@@ -10,10 +10,11 @@
     name: git
     state: present
 
-- name: Import Jenkins repo GPG key
+- name: Import Jenkins repo GPG keys
   ansible.builtin.rpm_key:
-    key: "{{ jenkins_repo_key }}"
+    key: "{{ item }}"
     state: present
+  loop: "{{ jenkins_repo_keys }}"
 
 - name: Add Jenkins repo
   ansible.builtin.yum_repository:
@@ -21,7 +22,7 @@
     description: Jenkins-stable
     baseurl: "{{ jenkins_repo_url }}"
     gpgcheck: true
-    gpgkey: "{{ jenkins_repo_key }}"
+    gpgkey: "{{ jenkins_repo_keys }}"
     enabled: true
 
 - name: Install Jenkins
