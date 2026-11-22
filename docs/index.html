@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iVolve DevOps Final Project - Moaz Elgendy</title>
+<meta name="description" content="A three-service app delivered from git push to EKS: Terraform, Ansible, Jenkins with Trivy, Argo CD, Vault and Prometheus/Grafana. iVolve / NTI DevOps final project by Moaz Elgendy.">
+<meta property="og:title" content="iVolve DevOps Final Project">
+<meta property="og:description" content="Terraform, Jenkins, Argo CD, Vault and Grafana on one EKS cluster, with the screenshots and the build failures.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="images/architecture.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+<strong>Moaz Elgendy</strong>
+<nav aria-label="Profiles"><a href="https://github.com/Moaz-Elgendy">GitHub</a><a href="https://www.linkedin.com/in/moaz-m-elgendy">LinkedIn</a></nav>
+</div></header>
+<main>
+<div class="wrap">
+<div class="hero">
+<h1>A three-service app, shipped from git push to EKS.</h1>
+<p>Terraform, Ansible, Jenkins with Trivy, Argo CD, Vault and Prometheus/Grafana on one EKS cluster.</p>
+<div class="links"><a href="https://github.com/Moaz-Elgendy/ivolve-final-project">Source on GitHub</a><a href="https://github.com/Moaz-Elgendy/ivolve-final-project#readme">Read the docs</a></div>
+<p class="note">Final project of the iVolve / NTI DevOps program.</p>
+</div>
+<figure class="hero-fig"><a href="images/architecture.png"><img src="images/architecture.png" width="1600" height="1000" alt="Architecture: git push to Jenkins (build, Trivy scan, push to ECR, bump imageTag) to the environment branch, then Argo CD syncing to EKS namespaces, with Vault, monitoring, KMS and ECR"></a></figure>
+</div>
+
+<section aria-labelledby="infra"><div class="wrap">
+<h2 id="infra">Infrastructure</h2>
+<p class="lead">One Terraform stack with 4 modules, shared by all environments. State lives in S3 with a native lockfile; the bucket name contains the account ID, so it is passed at init through a git-ignored <code>backend.hcl</code>.</p>
+<figure><a href="images/aws-network.png"><img loading="lazy" src="images/aws-network.png" width="1600" height="1000" alt="AWS network: VPC 10.0.0.0/16 across 2 availability zones, public subnets with the Jenkins EC2, NAT and load balancers, private subnets with the EKS nodes"></a></figure>
+<div class="grid2">
+<div><h3><code>network</code></h3><p>VPC 10.0.0.0/16, 2 public and 2 private subnets, internet gateway, 1 NAT, route tables, ELB subnet tags.</p></div>
+<div><h3><code>ec2</code></h3><p>The Jenkins host: t3.small, 30 GiB encrypted gp3, IMDSv2 required, SSH and port 8080 only from my IP, ECR access through an instance role.</p></div>
+<div><h3><code>ecr</code></h3><p>9 repos generated from <code>setproduct(services, environments)</code>, scan on push, AES256.</p></div>
+<div><h3><code>eks</code></h3><p>Cluster 1.35, 2 fixed on-demand nodes, vpc-cni with network policy, Pod Identity agent, EBS CSI, and the KMS key Vault unseals with.</p></div>
+</div>
+</div></section>
+
+<section aria-labelledby="pipeline"><div class="wrap">
+<h2 id="pipeline">Pipeline</h2>
+<p class="lead">One parameterised Jenkins pipeline (<code>ENV</code> is dev, stg or prod). The shared library provides <code>buildImage</code>, <code>testImage</code> and <code>pushImage</code>. Jenkins never talks to the cluster.</p>
+<div class="split">
+<ol class="stages">
+<li><strong>Checkout</strong> the branch named by <code>ENV</code>; the image tag is the build number.</li>
+<li><strong>Build</strong> the 3 images with <code>docker build</code>.</li>
+<li><strong>Test</strong> each with Trivy, report-only.</li>
+<li><strong>Push</strong> to ECR with the instance role.</li>
+<li><strong>Update deploy branch</strong> by rewriting <code>imageTag</code> in <code>values-&lt;env&gt;.yaml</code> and pushing to the branch.</li>
+</ol>
+<figure><a href="images/jenkins-stage-view.png"><img loading="lazy" src="images/jenkins-stage-view.png" width="1600" height="857" alt="Jenkins stage view: 5 builds, #1 and #2 failed at Build, #3 and #4 failed at Test, #5 green"></a>
+<figcaption>Builds #1-#2 failed at Build, #3-#4 at Test, #5 green in about 1 minute.</figcaption></figure>
+</div>
+</div></section>
+
+<section aria-labelledby="gitops"><div class="wrap">
+<h2 id="gitops">GitOps</h2>
+<p class="lead">Argo CD sees the <code>imageTag</code> commit, renders the Helm chart and applies it. Each environment is a git branch, an Argo Application, a namespace and a values file.</p>
+<div class="pair">
+<figure><a href="images/argocd-dev-tree.png"><img loading="lazy" src="images/argocd-dev-tree.png" width="1600" height="855" alt="Argo CD resource tree for ivolve-dev, Synced, deploying build 5"></a></figure>
+<figure><a href="images/argocd-dev-network.png"><img loading="lazy" src="images/argocd-dev-network.png" width="1600" height="855" alt="Argo CD network view: each ivolve-dev Service routing to its pod"></a></figure>
+</div>
+<div class="tablewrap"><table>
+<thead><tr><th>Env</th><th>Branch</th><th>Sync</th><th>Namespace</th></tr></thead>
+<tbody>
+<tr><td>dev</td><td><code>dev</code></td><td>automatic, prune, self-heal</td><td><code>ivolve-dev</code></td></tr>
+<tr><td>stg</td><td><code>stg</code></td><td>automatic, prune, self-heal</td><td><code>ivolve-stg</code></td></tr>
+<tr><td>prod</td><td><code>prod</code></td><td>manual</td><td><code>ivolve-prod</code></td></tr>
+</tbody></table></div>
+</div></section>
+
+<section aria-labelledby="secrets"><div class="wrap">
+<h2 id="secrets">Secrets</h2>
+<p class="lead">Database passwords and the session secret live in Vault (KV v2, auto-unsealed with KMS), not in git or Helm values.</p>
+<div class="split">
+<ol class="flow">
+<li>A pod starts with its ServiceAccount (<code>frontend</code>, <code>auth</code> or <code>mysql</code>) and <code>agent-inject</code> annotations.</li>
+<li>The Vault Agent Injector adds a sidecar.</li>
+<li>The sidecar logs in through Kubernetes auth, role <code>ivolve</code>, 1 hour ttl.</li>
+<li>Policy <code>ivolve</code> allows reading <code>secret/data/ivolve/*</code>.</li>
+<li>The sidecar renders <code>/vault/secrets/db</code> or <code>/frontend</code>.</li>
+<li>The container command sources that file, so the secrets become env vars.</li>
+</ol>
+<figure><a href="images/vault-setup-script.png"><img loading="lazy" src="images/vault-setup-script.png" width="1111" height="849" alt="Terminal output of helm/vault/setup.sh enabling Kubernetes auth, writing a policy and KV secrets"></a>
+<figcaption>Output of <code>helm/vault/setup.sh</code>, run once after install.</figcaption></figure>
+</div>
+</div></section>
+
+<section aria-labelledby="obs"><div class="wrap">
+<h2 id="obs">Observability</h2>
+<p class="lead">kube-prometheus-stack in its own namespace: Prometheus with 7 days of retention, Grafana reached by port-forward. I captured each worker node before and after the app was deployed.</p>
+<figure><a href="images/grafana-node1-before-after.png"><img loading="lazy" src="images/grafana-node1-before-after.png" width="1600" height="604" alt="Grafana worker node 1 resource usage before and after the application was deployed"></a></figure>
+<figure style="margin-top:32px"><a href="images/grafana-ns-dev-memory.png"><img loading="lazy" src="images/grafana-ns-dev-memory.png" width="1600" height="855" alt="Grafana panel of memory usage per pod in namespace ivolve-dev"></a>
+<figcaption>Memory per pod in <code>ivolve-dev</code>. Requests and limits are set per pod in the chart.</figcaption></figure>
+</div></section>
+
+<section aria-labelledby="cluster"><div class="wrap">
+<h2 id="cluster">Running cluster</h2>
+<p class="lead">Output from the live cluster on 2026-11-22: EKS in eu-west-1 with 2 nodes. The second container on auth, frontend and mysql is the Vault agent sidecar; roadmap uses no secrets, so it has none.</p>
+<pre tabindex="0"><code><span class="p">$</span> kubectl get nodes
+ip-10-0-2-141.eu-west-1.compute.internal   Ready   v1.35.9-eks-9adbfea
+ip-10-0-3-112.eu-west-1.compute.internal   Ready   v1.35.9-eks-9adbfea
+
+<span class="p">$</span> kubectl get pods -n ivolve-dev
+NAME                        READY   STATUS    RESTARTS
+auth-6b9dc8f9d8-5vjhl       2/2     Running   0
+frontend-6fc4f9ffc-lxqn7    2/2     Running   0
+mysql-0                     2/2     Running   0
+roadmap-6f5785b5f4-fltds    1/1     Running   0</code></pre>
+</div></section>
+
+<section aria-labelledby="decisions"><div class="wrap">
+<h2 id="decisions">Decisions and what broke</h2>
+<ul class="fail">
+<li><strong>Jenkins never touches the cluster</strong><span>It builds, scans, pushes and edits <code>imageTag</code>. Argo CD deploys, so cluster credentials never sit on the CI host.</span></li>
+<li><strong>Builds #1 and #2 failed at Build</strong><span>The <code>jenkins</code> user had no Docker socket permission. I added it to the <code>docker</code> group; that now lives in the Ansible <code>docker</code> role, which restarts Jenkins.</span></li>
+<li><strong>Builds #3 and #4 failed at Test</strong><span>The Trivy Java DB overflowed the 2 GiB RAM-backed <code>/tmp</code>, and the exit code was blocking. Fix: <code>TMPDIR=$HOME/trivy-tmp</code> and <code>--exit-code 0</code>. Build #5 passed end to end.</span></li>
+<li><strong>Trivy is report-only, on purpose</strong><span>With a blocking exit code, unfixed base-image CVEs failed every build. The trade-off: HIGH and CRITICAL findings are logged, not enforced.</span></li>
+</ul>
+</div></section>
+</main>
+<footer><div class="wrap">
+<p>iVolve / NTI DevOps final project, Moaz Elgendy.</p>
+<p><a href="https://github.com/Moaz-Elgendy/ivolve-final-project">Repository</a> &middot; <a href="https://github.com/Moaz-Elgendy/ivolve-final-project#readme">Read the full documentation</a></p>
+</div></footer>
+</body>
+</html>

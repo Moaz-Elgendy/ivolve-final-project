@@ -1,472 +1,207 @@
 <p align="center">
-  <img src="app/frontend/public/images/nti-logo.png" height="90"/>
+  <img src="app/frontend/public/images/nti-logo.png" height="90" alt="NTI logo"/>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="app/frontend/public/images/ivolve-logo.png" height="90"/>
+  <img src="app/frontend/public/images/ivolve-logo.png" height="90" alt="iVolve logo"/>
 </p>
 
 <h1 align="center">iVolve DevOps Final Project</h1>
 
 <p align="center">
   A three-service web app (login + DevOps roadmap) delivered end to end:<br/>
-  Terraform on AWS &rarr; Ansible-built Jenkins &rarr; Trivy-gated image builds into ECR &rarr; Argo CD GitOps onto one EKS cluster &rarr; Vault secrets &rarr; Prometheus/Grafana monitoring.
+  Terraform on AWS, Ansible-built Jenkins, Trivy-scanned images in ECR, Argo CD GitOps onto one EKS cluster, Vault secrets, Prometheus/Grafana.
 </p>
 
----
+<p align="center"><a href="https://moaz-elgendy.github.io/ivolve-final-project/">Project site</a> (screenshots, pipeline history, cluster output)</p>
 
-## Table of contents
+![Architecture: git push to Jenkins (build, Trivy scan, push to ECR, bump imageTag) to the environment branch, Argo CD syncing to EKS namespaces, with Vault, monitoring, KMS and ECR](docs/images/architecture.png)
 
-1. [What this project is](#1-what-this-project-is)
-2. [Full architecture](#2-full-architecture)
-3. [AWS network and infrastructure](#3-aws-network-and-infrastructure)
-4. [CI/CD flow](#4-cicd-flow)
-5. [Inside the Kubernetes cluster](#5-inside-the-kubernetes-cluster)
-6. [Secrets flow (Vault)](#6-secrets-flow-vault)
-7. [The application](#7-the-application)
-8. [Repository layout](#8-repository-layout)
-9. [Component reference](#9-component-reference)
-10. [What stays out of git](#10-what-stays-out-of-git)
-11. [Deployment runbook](#11-deployment-runbook)
+## Stack at a glance
 
----
-
-## 1. What this project is
-
-| Layer | Tooling | Where in the repo |
+| Layer | Tooling | Folder |
 | --- | --- | --- |
 | Application | Node.js frontend, Python auth service, Java roadmap service, MySQL | [app/](app/) |
-| Local run | Docker Compose | [app/docker-compose.yaml](app/docker-compose.yaml) |
-| Infrastructure as Code | Terraform (VPC, 1 EC2, 1 ECR with 9 repos, 1 EKS, KMS), S3 remote state | [terraform/](terraform/) |
-| Configuration management | Ansible (git, Jenkins, Docker, Trivy on the EC2 host) | [ansible/](ansible/) |
-| CI | One Jenkins host, one parameterised pipeline (`ENV`) + shared library | [Jenkinsfile](Jenkinsfile), [jenkins/](jenkins/) |
-| Image security | Trivy (fails the build on HIGH/CRITICAL) | [jenkins/shared-library/vars/testImage.groovy](jenkins/shared-library/vars/testImage.groovy) |
-| Registry | Amazon ECR, repos `<service>-<env>` | [terraform/modules/ecr/](terraform/modules/ecr/) |
-| CD (GitOps) | One Argo CD, one Application per environment | [argo/applications/](argo/applications/) |
+| Infrastructure | Terraform: VPC, 1 EC2, 9 ECR repos, 1 EKS cluster, KMS key; S3 remote state | [terraform/](terraform/) |
+| Configuration | Ansible: git, Jenkins, Docker, Trivy on the EC2 host | [ansible/](ansible/) |
+| CI | One Jenkins host, one parameterised pipeline (`ENV`), shared library | [Jenkinsfile](Jenkinsfile), [jenkins/](jenkins/) |
+| Image scan | Trivy, report-only | [testImage.groovy](jenkins/shared-library/vars/testImage.groovy) |
+| CD | Argo CD, one Application per environment | [argo/applications/](argo/applications/) |
 | Packaging | Helm chart | [helm/ivolve/](helm/ivolve/) |
-| Secrets | HashiCorp Vault (KMS auto-unseal) + Agent Injector | [helm/vault/](helm/vault/) |
+| Secrets | HashiCorp Vault, KMS auto-unseal, Agent Injector | [helm/vault/](helm/vault/) |
 | Monitoring | kube-prometheus-stack (Prometheus + Grafana) | [helm/monitoring/](helm/monitoring/) |
 
-The app: a user signs up and logs in, then sees a DevOps roadmap (OS, SCM, Containerization, Orchestration, CI/CD, Cloud, IaC, Configuration Management).
+One of everything shared (VPC, EKS cluster, Jenkins EC2, Argo CD, Vault, monitoring, ECR). Three of everything per environment (dev, stg, prod): git branch, Argo Application, namespace `ivolve-<env>`, 3 ECR repos, Helm values file.
 
-**One of everything shared, three of everything environment-specific:**
+## How it flows
 
-| Shared (one) | Per environment (dev, stg, prod) |
+1. A developer pushes code to branch `dev`, `stg` or `prod` and runs the Jenkins pipeline with `ENV` set.
+2. Jenkins checks out that branch and sets `IMAGE_TAG` to the build number.
+3. Jenkins builds the 3 images and Trivy scans each one (report-only).
+4. Jenkins pushes `<service>-<env>:<build>` to ECR using the EC2 instance role.
+5. Jenkins rewrites `imageTag` in `helm/ivolve/values-<env>.yaml` and pushes that commit to branch `<env>`.
+6. Argo CD sees the commit, renders the chart and applies it to `ivolve-<env>` (auto in dev/stg, manual in prod).
+
+Jenkins never talks to the cluster; git is the source of truth.
+
+## Evidence
+
+Live cluster, 2026-11-22: EKS with 2 nodes (`v1.35.9-eks`, eu-west-1). Namespaces `argocd`, `vault`, `monitoring`, `kube-system` and `ivolve-dev` running.
+
+```text
+$ kubectl get pods -n ivolve-dev
+NAME                        READY   STATUS    RESTARTS
+auth-6b9dc8f9d8-5vjhl       2/2     Running   0
+frontend-6fc4f9ffc-lxqn7    2/2     Running   0
+mysql-0                     2/2     Running   0
+roadmap-6f5785b5f4-fltds    1/1     Running   0
+```
+
+The second container on auth, frontend and mysql is the Vault agent sidecar. Roadmap uses no secrets, so it has none. Dev runs 1 replica per service.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/jenkins-stage-view.png" alt="Jenkins stage view: 5 builds, #1-#2 failed at Build, #3-#4 failed at Test, #5 green" width="100%"/><br/>Jenkins: builds #1-#2 failed at Build, #3-#4 at Test, #5 green (about 1 min).</td>
+    <td width="50%"><img src="docs/images/argocd-dev-tree.png" alt="Argo CD resource tree for ivolve-dev, Synced, deploy build 5" width="100%"/><br/>Argo CD: <code>ivolve-dev</code> resource tree, synced to deploy build 5.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/argocd-dev-network.png" alt="Argo CD network view: each ivolve-dev Service routing to its pod" width="100%"/><br/>Argo CD network view of <code>ivolve-dev</code>.</td>
+    <td><img src="docs/images/argocd-dev-pods-by-node.png" alt="Argo CD pods grouped by node, spread across the 2 EKS worker nodes" width="100%"/><br/>Pods spread across the 2 worker nodes.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/vault-setup-script.png" alt="Terminal output of helm/vault/setup.sh enabling Kubernetes auth, writing a policy and KV secrets" width="100%"/><br/><code>helm/vault/setup.sh</code>: Kubernetes auth, policy, KV secrets.</td>
+    <td><img src="docs/images/vault-ui-secrets-engines.png" alt="Vault UI secrets engines page showing KV v2 mounted at secret/" width="100%"/><br/>Vault UI: KV v2 at <code>secret/</code>.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/vault-ui-ivolve-secrets.png" alt="Vault UI listing secret/ivolve/db and secret/ivolve/frontend" width="100%"/><br/>Vault UI: <code>secret/ivolve/db</code> and <code>frontend</code>.</td>
+    <td><img src="docs/images/grafana-ns-dev-cpu.png" alt="Grafana panel of CPU usage per pod in namespace ivolve-dev" width="100%"/><br/>Grafana: CPU per pod in <code>ivolve-dev</code>.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/grafana-ns-dev-memory.png" alt="Grafana panel of memory usage per pod in namespace ivolve-dev" width="100%"/><br/>Grafana: memory per pod in <code>ivolve-dev</code>.</td>
+    <td><img src="docs/images/grafana-node1-before-after.png" alt="Grafana worker node 1 resource usage before and after the application was deployed" width="100%"/><br/>Worker node 1, before and after the app.</td>
+  </tr>
+  <tr><td colspan="2"><img src="docs/images/grafana-node2-before-after.png" alt="Grafana worker node 2 resource usage before and after the application was deployed" width="50%"/><br/>Worker node 2, before and after the app.</td></tr>
+</table>
+
+## Components
+
+### Terraform ([terraform/](terraform/))
+
+![AWS network: VPC 10.0.0.0/16 across 2 availability zones with public subnets (Jenkins EC2, NAT, load balancers) and private subnets (EKS nodes)](docs/images/aws-network.png)
+
+One stack with 4 modules, shared by all environments.
+
+| Module | Creates |
 | --- | --- |
-| AWS VPC, EKS cluster, Jenkins EC2, Argo CD, Vault, monitoring, ECR registry | git branch, Argo Application, namespace `ivolve-<env>`, 3 ECR repos (`frontend-dev`, ...), Helm values file |
+| `network` | VPC `10.0.0.0/16`, 2 public + 2 private subnets, IGW, 1 NAT + EIP, route tables, permissive NACL, ELB subnet tags |
+| `ec2` | The Jenkins instance: `t3.small`, 30 GiB encrypted gp3, IMDSv2 required, SSH and port 8080 only from `ssh_cidr_blocks`, IAM role `AmazonEC2ContainerRegistryPowerUser` |
+| `ecr` | 9 repos from `setproduct(services, environments)` (`frontend-dev` ...): scan on push, AES256, MUTABLE tags |
+| `eks` | Cluster 1.35 (private + public endpoint), 2 fixed ON_DEMAND nodes, IAM roles, add-ons (vpc-cni with network policy, Pod Identity agent, EBS CSI), Vault KMS key + role + Pod Identity association |
 
----
+State is in S3 with a native lockfile. The bucket name (it contains the account ID) is passed at init through the git-ignored `backend.hcl`.
 
-## 2. Full architecture
+### Ansible ([ansible/](ansible/))
 
-End-to-end view: who talks to whom, from a `git push` to a pod serving a browser.
+The dynamic inventory (`amazon.aws.aws_ec2`) matches tag `Name=ivolve-ec2-instance` in state `running`, which is the one Jenkins host. [playbook.yml](ansible/playbook.yml) updates packages, then runs 3 roles:
 
-```text
-                                      ┌────────────────┐
-                                      │   Developer    │
-                                      └───────┬────────┘
-                                              │ git push (branch dev | stg | prod)
-                                              ▼
- ┌──────────────────────────────────────────────────────────────────────────────────────────┐
- │                         GitHub (public repo, plain https)                                │
- │   main            dev                    stg                    prod                     │
- │   (source)   helm/ivolve/values-dev   values-stg             values-prod                  │
- │              imageTag: "<N>"          imageTag: "<N>"        imageTag: "<N>"             │
- └───────▲───────────────┬──────────────────────────────────────────────▲───────────────────┘
-         │               │ 1. checkout branch = ENV (no credential)      │ 5. commit + push (PAT credential)
-         │               ▼                                               │    "ci(ENV): deploy build N"
-         │   ┌──────────────────────────────────────────────┐            │    (only edits imageTag)
-         │   │   Jenkins  (ONE EC2, public subnet, AL2023)  │────────────┘
-         │   │   one Jenkinsfile, parameter ENV             │
-         │   │   2. buildImage  docker build  x3            │        ┌──────────────────────────┐
-         │   │   3. testImage   trivy image (HIGH,CRITICAL) │        │  Amazon ECR  (9 repos)   │
-         │   │   4. pushImage   docker push  ───────────────┼───────►│  frontend-<env>          │
-         │   │   tag = BUILD_NUMBER; auth: EC2 IAM role     │        │  auth-service-<env>      │
-         │   └──────────────────────────────────────────────┘        │  roadmap-service-<env>   │
-         │                                                           └────────────┬─────────────┘
-         │  6. Argo CD polls branch ENV, renders helm/ivolve                       │ 8. kubelet pulls image
-         │     with values.yaml + values-ENV.yaml                                  │    (node role: ECR read-only)
- ┌───────┴────────────────────────────────────────────────────────────────────────┼─────────────┐
- │                                    AWS  eu-west-1                              │             │
- │  ┌───────────────────────────────────────────────────────────────────────────┐ │             │
- │  │  ONE EKS cluster (private subnets, 2 x m7i-flex.large, public API = my IP)│ │             │
- │  │                                                                           ▼ │             │
- │  │  ns argocd      ONE Argo CD ── 7. apply (auto-sync dev/stg, manual prod)    │             │
- │  │                                                                             │             │
- │  │  ns ivolve-dev  | ns ivolve-stg  | ns ivolve-prod   (same layout in each)   │             │
- │  │    frontend x2 ──► auth x2 ──► mysql (StatefulSet, EBS gp3 5Gi)             │             │
- │  │         └────────► roadmap x2                                               │             │
- │  │    NetworkPolicies + resource limits; Vault Agent sidecar for secrets       │             │
- │  │                                                                             │             │
- │  │  ns vault       Vault (standalone, KMS auto-unseal) + Agent Injector        │             │
- │  │  ns monitoring  Prometheus (7d, 10Gi) + Grafana (2Gi)                       │             │
- │  │  kube-system    EBS CSI driver, Pod Identity agent, VPC CNI (netpol on)     │             │
- │  └─────────────────────────────────────────────────────────────────────────────┘             │
- │        ▲ Service type LoadBalancer :80 per namespace (public subnets)    KMS key (Vault)     │
- └────────┼─────────────────────────────────────────────────────────────────────────────────────┘
-          │
-   ┌──────┴──────┐
-   │   Browser   │
-   └─────────────┘
+* `jenkins`: git, Corretto 21, Jenkins stable repo and GPG key, install, enable.
+* `docker`: install, enable, add `jenkins` to the `docker` group, restart Jenkins to apply it.
+* `trivy`: release rpm 0.58.0 (GPG check off, the rpm is unsigned).
 
- Terraform state:  S3 bucket (name has the account ID, kept out of git), key terraform.tfstate, native lockfile
- Ansible:          configures the one Jenkins EC2 host over SSH (git, java, jenkins, docker, trivy)
-```
+### Jenkins ([Jenkinsfile](Jenkinsfile), [jenkins/shared-library/vars/](jenkins/shared-library/vars/))
 
-Key design rules:
-
-* **Jenkins never touches the cluster.** It builds, scans, pushes, and edits `imageTag` in git. Argo CD does the deploy.
-* **Git is the source of truth.** The deployed image tag is whatever the environment branch says. Tags are Jenkins build numbers.
-* **No secrets or account details in git.** DB credentials and the session secret live in Vault. The AWS account ID and your IP stay in git-ignored files or are computed at run time (section 10).
-
----
-
-## 3. AWS network and infrastructure
-
-Terraform creates **one** stack, used by all three environments.
-
-```text
-                                         Internet
-                                             │
-                                  ┌──────────┴──────────┐
-                                  │  Internet Gateway   │
-                                  └──────────┬──────────┘
- ┌───────────────────────────────────────────┼─────────────────────────────────────────────┐
- │ VPC 10.0.0.0/16   (DNS hostnames on)      │         NACL: allow all in/out (all subnets) │
- │                                           │                                             │
- │  ┌─────────────── AZ a ───────────────┐   │   ┌─────────────── AZ b ───────────────┐    │
- │  │ PUBLIC  10.0.0.0/24                │◄──┴──►│ PUBLIC  10.0.1.0/24                │    │
- │  │  route 0.0.0.0/0 -> IGW            │       │  route 0.0.0.0/0 -> IGW            │    │
- │  │  ┌────────────────────────┐        │       │  tag kubernetes.io/role/elb=1      │    │
- │  │  │ EC2 Jenkins (t3.small) │        │       │   (load balancer ENIs land here)   │    │
- │  │  │ 30 GiB gp3, encrypted  │        │       └────────────────────────────────────┘    │
- │  │  │ SG: 22+8080 from my IP │        │                                                 │
- │  │  │ IMDSv2 required        │        │                                                 │
- │  │  │ role: ECR PowerUser    │        │                                                 │
- │  │  └────────────────────────┘        │                                                 │
- │  │  ┌────────────────────────┐        │                                                 │
- │  │  │ NAT Gateway + EIP      │        │   (single NAT, shared by both private subnets)  │
- │  │  └───────────┬────────────┘        │                                                 │
- │  └──────────────┼─────────────────────┘                                                 │
- │                 │ private route 0.0.0.0/0 -> NAT                                         │
- │  ┌──────────────▼──── AZ a ───────────┐       ┌─────────────── AZ b ───────────────┐    │
- │  │ PRIVATE 10.0.2.0/24                │       │ PRIVATE 10.0.3.0/24                │    │
- │  │  EKS worker node 1                 │       │  EKS worker node 2                 │    │
- │  │  tag role/internal-elb=1           │       │  EKS managed ENIs                  │    │
- │  └────────────────────────────────────┘       └────────────────────────────────────┘    │
- └─────────────────────────────────────────────────────────────────────────────────────────┘
-
- Outside the VPC (regional):
-   EKS control plane  version 1.35, private + public endpoint (public limited to eks_public_access_cidrs)
-   ECR                9 repositories (3 services x 3 envs), scan_on_push, AES256, MUTABLE tags
-   KMS                1 key (rotation on) for Vault auto-unseal
-   IAM                jenkins role/profile, eks cluster role, eks node role, ebs-csi role, vault role (Pod Identity)
-   EKS add-ons        vpc-cni (network policy enabled), eks-pod-identity-agent, aws-ebs-csi-driver
-```
-
-### Terraform module map
-
-```text
-terraform/
-├── main.tf ───────────────► wires modules together
-│     ├── module "network" ─► VPC, 2 public + 2 private subnets, IGW, NAT, route tables, NACL
-│     ├── module "ec2"     ─► the one Jenkins instance, its security group, IAM role + instance profile
-│     ├── module "ecr"     ─► repos from setproduct(services, environments): frontend-dev, frontend-stg, ...
-│     └── module "eks"     ─► cluster, node group (2 fixed), IAM roles, add-ons, Vault KMS key + role + Pod Identity
-├── provider.tf ───────────► aws ~> 6.0; S3 backend, bucket supplied at init (backend.hcl, git-ignored)
-├── terraform.tfvars.example ► copy to terraform.tfvars (git-ignored)
-└── backend.hcl.example ───► copy to backend.hcl (git-ignored)
-```
-
----
-
-## 4. CI/CD flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Dev as Developer
-    participant GH as GitHub (branch = env)
-    participant J as Jenkins (one EC2)
-    participant T as Trivy
-    participant ECR as Amazon ECR
-    participant A as Argo CD
-    participant K as EKS (ns ivolve-env)
-    Dev->>GH: push code to dev / stg / prod
-    Dev->>J: run pipeline, choose ENV
-    J->>GH: checkout branch ENV (public https), IMAGE_TAG = BUILD_NUMBER
-    loop frontend, auth-service, roadmap-service
-        J->>J: docker build  (name-ENV:BUILD_NUMBER)
-    end
-    loop each image
-        J->>T: trivy image --exit-code 1 --severity HIGH,CRITICAL
-        T-->>J: pass or fail the build
-    end
-    J->>ECR: aws ecr get-login-password, docker push (IAM role)
-    J->>GH: set imageTag in values-ENV.yaml, commit, push to branch ENV
-    A->>GH: poll branch ENV, see new commit
-    A->>K: helm render + apply (auto in dev/stg, manual sync in prod)
-    K->>ECR: pull name-ENV:BUILD_NUMBER
-```
-
-### Pipeline stages ([Jenkinsfile](Jenkinsfile))
+One pipeline, parameter `ENV` (dev, stg, prod). The shared library provides `buildImage`, `testImage`, `pushImage`.
 
 | # | Stage | What it does |
 | --- | --- | --- |
-| 1 | Checkout | Clones branch `params.ENV` over https (public repo, no credential). `IMAGE_TAG` = Jenkins build number. The registry host is computed from `aws sts get-caller-identity`, so the account ID is not in the file. |
-| 2 | Build | `buildImage` runs `docker build` for each service, tagged `<registry>/<service>-<ENV>:<build>`. |
-| 3 | Test | `testImage` runs `trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL`. A HIGH/CRITICAL finding that has a fix stops the pipeline; unfixed base-image CVEs do not. |
-| 4 | Push | `pushImage` logs in to ECR with the instance IAM role and pushes. |
-| 5 | Update deploy branch | Rewrites `imageTag: "<build>"` in `helm/ivolve/values-<ENV>.yaml`, commits as `jenkins`, pushes to branch `<ENV>` using the `github-https` credential (a GitHub token with write access). |
+| 1 | Checkout | Clones branch `params.ENV` over https (public repo, no credential). `IMAGE_TAG` = build number. Registry host comes from `aws sts get-caller-identity`, so no account ID in the file. |
+| 2 | Build | `buildImage`: `docker build` per service, tagged `<registry>/<service>-<ENV>:<build>`. |
+| 3 | Test | `testImage`: `trivy image --exit-code 0 --ignore-unfixed --severity HIGH,CRITICAL` with `TMPDIR=$HOME/trivy-tmp`. Findings are printed in the log; the build continues. |
+| 4 | Push | `pushImage`: ECR login with the instance IAM role, `docker push`. |
+| 5 | Update deploy branch | Rewrites `imageTag: "<build>"` in `values-<ENV>.yaml`, commits as `jenkins`, pushes to branch `<ENV>` with credential `github-https`. |
 
-The shared library lives in [jenkins/shared-library/vars/](jenkins/shared-library/vars/) (`buildImage`, `testImage`, `pushImage`).
+### Helm chart ([helm/ivolve/](helm/ivolve/))
 
-### Promotion model
+One release per environment namespace: Deployments for frontend, auth and roadmap, StatefulSet for MySQL (5Gi gp3 PVC), a LoadBalancer Service for the frontend, ServiceAccounts, NetworkPolicies. App containers run as non-root with all capabilities dropped, no privilege escalation and the default seccomp profile (MySQL excepted: its entrypoint starts as root). Base `values.yaml` sets 2 replicas; dev and stg override to 1.
 
-| Env | Git branch | Argo sync | Namespace | ECR repos |
+| Pod | Accepts traffic from | Port | CPU req / limit | Memory req / limit |
+| --- | --- | --- | --- | --- |
+| frontend | anywhere (load balancer) | 3000 | 50m / 250m | 64Mi / 256Mi |
+| auth | frontend pods only | 5000 | 50m / 250m | 64Mi / 256Mi |
+| roadmap | frontend pods only | 8080 | 100m / 500m | 256Mi / 512Mi |
+| mysql | auth pods only | 3306 | 100m / 500m | 256Mi / 1Gi |
+
+Ingress is denied by default in each namespace and opened only as above; egress is open (DNS, Vault agent). Policies are enforced because Terraform enables `enableNetworkPolicy` on the VPC CNI. Vault runs at 50m / 250m CPU and 128Mi / 256Mi memory.
+
+### Argo CD ([argo/applications/](argo/applications/))
+
+Three Applications, one per environment. The registry host is not in git: each Application passes `registry=${ECR_REGISTRY}`, filled by `envsubst` at `kubectl apply`.
+
+| Env | Git branch | Sync | Namespace | ECR repos |
 | --- | --- | --- | --- | --- |
 | dev | `dev` | automatic, prune, self-heal | `ivolve-dev` | `*-dev` |
 | stg | `stg` | automatic, prune, self-heal | `ivolve-stg` | `*-stg` |
-| prod | `prod` | **manual** | `ivolve-prod` | `*-prod` |
+| prod | `prod` | manual | `ivolve-prod` | `*-prod` |
 
-Until the first Jenkins run for an environment, `values-<env>.yaml` holds the placeholder `imageTag: "0"`; pods stay in `ImagePullBackOff` until Jenkins pushes build 1 and updates the file.
+Until an environment's first Jenkins run, `values-<env>.yaml` holds `imageTag: "0"` and pods stay in `ImagePullBackOff`.
 
----
+### Vault ([helm/vault/](helm/vault/))
 
-## 5. Inside the Kubernetes cluster
-
-One release of the [ivolve Helm chart](helm/ivolve/) per environment namespace:
-
-```text
-                              Internet
-                                  │
-                       ┌──────────▼───────────┐
-                       │ Service "frontend"   │  type LoadBalancer, :80 -> 3000
-                       │ sessionAffinity:     │  same browser -> same pod
-                       │ ClientIP (1h)        │
-                       └──────────┬───────────┘
-                                  │
-        ┌─────────────────────────▼─────────────────────────┐
-        │ Deployment frontend (x2)   SA: frontend           │
-        │  Node.js / Express / EJS, express-session         │
-        │  env: AUTH_SERVICE_URL=http://auth:5000           │
-        │       ROADMAP_SERVICE_URL=http://roadmap:8080     │
-        │  Vault secret: SESSION_SECRET                     │
-        └───────────┬─────────────────────────┬─────────────┘
-                    │ HTTP                    │ HTTP
-        ┌───────────▼─────────────┐   ┌───────▼───────────────────┐
-        │ Service "auth" :5000    │   │ Service "roadmap" :8080   │
-        └───────────┬─────────────┘   └───────┬───────────────────┘
-                    │                         │
-        ┌───────────▼─────────────┐   ┌───────▼───────────────────┐
-        │ Deployment auth (x2)    │   │ Deployment roadmap (x2)   │
-        │  Python / Flask         │   │  Java 21 / Spring Boot    │
-        │  SA: auth               │   │  GET /api/roadmap         │
-        │  readiness: GET /health │   │  static data, no DB       │
-        │  Vault secret: DB creds │   │  no Vault                 │
-        └───────────┬─────────────┘   └───────────────────────────┘
-                    │ MySQL :3306
-        ┌───────────▼─────────────┐
-        │ Service "mysql"         │  headless (clusterIP: None)
-        └───────────┬─────────────┘
-        ┌───────────▼─────────────┐
-        │ StatefulSet mysql (x1)  │  SA: mysql, image mysql:8.0
-        │  Vault secret: DB creds │
-        │  PVC 5Gi, class gp3     │──► EBS gp3 volume (EBS CSI driver), mounted with subPath
-        └─────────────────────────┘
-```
-
-### Network policies and limits
-
-App containers run as a non-root numeric UID with all capabilities dropped, no privilege escalation and the default seccomp profile ([_helpers.tpl](helm/ivolve/templates/_helpers.tpl)). MySQL is excluded because its entrypoint starts as root. Auth runs under gunicorn.
-
-Ingress is denied by default in each `ivolve-<env>` namespace and opened only along the arrows above ([networkpolicy.yaml](helm/ivolve/templates/networkpolicy.yaml)):
-
-| Pod | Accepts traffic from | Port |
-| --- | --- | --- |
-| frontend | anywhere (load balancer) | 3000 |
-| auth | frontend pods only | 5000 |
-| roadmap | frontend pods only | 8080 |
-| mysql | auth pods only | 3306 |
-
-Egress is left open (DNS, and the Vault Agent must reach Vault). Policies are enforced because Terraform turns on `enableNetworkPolicy` in the VPC CNI add-on.
-
-| Pod | CPU request / limit | Memory request / limit |
-| --- | --- | --- |
-| frontend | 50m / 250m | 64Mi / 256Mi |
-| auth | 50m / 250m | 64Mi / 256Mi |
-| roadmap | 100m / 500m | 256Mi / 512Mi |
-| mysql | 100m / 500m | 256Mi / 1Gi |
-| vault | 50m / 250m | 128Mi / 256Mi |
-
-Cluster-wide add-ons (outside the app chart):
-
-| Namespace | Component | Config |
-| --- | --- | --- |
-| `kube-system` | VPC CNI, EBS CSI driver, Pod Identity agent | EKS add-ons from Terraform |
-| `kube-system` | StorageClass `gp3` (default) | [helm/gp3-storageclass.yaml](helm/gp3-storageclass.yaml), WaitForFirstConsumer, expandable |
-| `vault` | Vault standalone, 2Gi gp3, injector, UI (ClusterIP) | [helm/vault/values.yaml](helm/vault/values.yaml) |
-| `monitoring` | Prometheus (7d retention, 10Gi), Grafana (2Gi, ClusterIP), Alertmanager off | [helm/monitoring/values.yaml](helm/monitoring/values.yaml) |
-| `argocd` | Argo CD + the 3 Application objects | [argo/applications/](argo/applications/) |
-
----
-
-## 6. Secrets flow (Vault)
-
-```text
-   ONE TIME (helm/vault/setup.sh)                         EVERY POD START
-   ─────────────────────────────                          ───────────────
-   vault operator init (recovery keys, root token)        1. API server admits the pod; the Vault
-   Vault auto-unseals with the AWS KMS key                   injector webhook sees the annotations
-   enable KV v2 at  secret/                                  vault.hashicorp.com/agent-inject*
-   enable kubernetes auth                                 2. Webhook adds an init container +
-   policy "ivolve": read secret/data/ivolve/*                sidecar (Vault Agent)
-   role "ivolve": SAs frontend,auth,mysql                 3. Agent logs in with the pod's
-        in ns ivolve-dev|stg|prod, ttl 1h                    ServiceAccount token (role "ivolve")
-   kv put secret/ivolve/db        user, password,         4. Agent renders the template to
-          root_password, name                                /vault/secrets/db  (or /frontend)
-   kv put secret/ivolve/frontend  session_secret          5. Container command:
-                                                             . /vault/secrets/db && exec <app>
-   AFTER ANY VAULT RESTART                                   so the secrets become env vars
-   ───────────────────────
-   Vault pod ─(Pod Identity role)─► KMS Decrypt ─► unsealed again, nothing to do by hand
-```
+Standalone Vault (2Gi gp3) in namespace `vault`, auto-unsealed with the Terraform-created KMS key through Pod Identity, with the Agent Injector. [setup.sh](helm/vault/setup.sh) runs once: `operator init`, enable KV v2 at `secret/`, enable Kubernetes auth, policy `ivolve` (read `secret/data/ivolve/*`), role `ivolve` for ServiceAccounts `frontend`, `auth`, `mysql` in `ivolve-dev|stg|prod` (ttl 1h). Pods carry `vault.hashicorp.com/agent-inject*` annotations; the injected sidecar renders `/vault/secrets/db` or `/frontend`, and the container command sources it (`. /vault/secrets/db && exec <app>`) so the secrets become env vars. All 3 environments read the same secrets.
 
 | Secret path | Keys | Used by |
 | --- | --- | --- |
-| `secret/ivolve/db` | `user`, `password`, `root_password`, `name` | `auth`, `mysql` |
-| `secret/ivolve/frontend` | `session_secret` | `frontend` |
+| `secret/ivolve/db` | `user`, `password`, `root_password`, `name` | auth, mysql |
+| `secret/ivolve/frontend` | `session_secret` | frontend |
 
-All three environments read the same Vault secrets (same policy and role). `helm/vault/vault-init.json` (recovery keys + root token) is created locally by `setup.sh` and is git-ignored. Store it somewhere safe.
+### Monitoring ([helm/monitoring/](helm/monitoring/))
 
----
+kube-prometheus-stack in namespace `monitoring`: Prometheus (7d retention, 10Gi), Grafana (2Gi, ClusterIP, reached by `port-forward`), Alertmanager off. The Grafana screenshots above compare node load before and after the app was deployed.
 
-## 7. The application
-
-### Services
+### Application ([app/](app/))
 
 | Service | Stack | Port | Role |
 | --- | --- | --- | --- |
-| frontend | Node 22, Express 5, EJS, express-session, axios | 3000 | Web UI, session cookie, calls the two backends |
-| auth-service | Python 3.12, Flask 3.1, bcrypt, mysql-connector | 5000 | Sign up, log in, creates the `users` table on demand |
-| roadmap-service | Java 21, Spring Boot 3.5 (multi-stage Maven build) | 8080 | Serves the 8-item roadmap list |
+| frontend | Node 22, Express 5, EJS, express-session | 3000 | Web UI, session cookie, calls the two backends |
+| auth-service | Python 3.12, Flask 3.1, bcrypt, gunicorn | 5000 | Sign up, log in, creates `users` table on demand |
+| roadmap-service | Java 21, Spring Boot 3.5 | 8080 | Serves the 8-item DevOps roadmap |
 | mysql | MySQL 8.0 | 3306 | `users(id, username UNIQUE, password_hash, created_at)` |
-
-### Request flow
-
-```text
- Browser ──► GET /            frontend: logged in? redirect /roadmap : render login page
- Browser ──► POST /signup     frontend ──► POST auth:5000/api/auth/signup  ──► INSERT users (bcrypt hash)
- Browser ──► POST /login      frontend ──► POST auth:5000/api/auth/login   ──► SELECT + bcrypt check
-                              success: session.user set, redirect /roadmap
- Browser ──► GET /roadmap     needs session; frontend ──► GET roadmap:8080/api/roadmap, renders roadmap.ejs
- Browser ──► POST /logout     session destroyed
- DB down ──► auth returns 503, frontend renders the "MySQL Connection Error" page
-```
-
-### HTTP APIs
 
 | Service | Method and path | Success | Errors |
 | --- | --- | --- | --- |
 | auth | `POST /api/auth/signup` `{username, password}` | 201 | 400 (username < 3 or password < 8 chars), 409 duplicate, 503 DB |
 | auth | `POST /api/auth/login` `{username, password}` | 200 + `user` | 401 bad credentials, 503 DB |
-| auth | `GET /health` | 200 `{"status":"UP"}` | 503 when the DB is unreachable |
-| roadmap | `GET /api/roadmap` | 200, JSON list of `{title, description}` | n/a |
+| auth | `GET /health` | 200 `{"status":"UP"}` | 503 when DB unreachable |
+| roadmap | `GET /api/roadmap` | 200, list of `{title, description}` | n/a |
 
-### Run it locally
+Run locally with `cd app && docker compose up --build` (http://localhost:3000). Details: [app/README.md](app/README.md).
 
-```bash
-cd app
-docker compose up --build        # http://localhost:3000
-```
-
-Compose isolates traffic on three networks: `app-auth` (frontend + auth), `db-auth` (auth + mysql), `app-roadmap` (frontend + roadmap). Only the frontend port is published. Defaults (`ivolve`/`ivolve`, session secret `change-me`) can be overridden with env vars. More detail: [app/README.md](app/README.md).
-
----
-
-## 8. Repository layout
-
-```text
-.
-├── Jenkinsfile                      CI pipeline (parameter ENV = dev | stg | prod)
-├── jenkins/shared-library/vars/     buildImage, testImage (Trivy), pushImage (ECR)
-├── argo/applications/               Argo CD Applications: ivolve-dev, -stg, -prod (registry via envsubst)
-├── helm/
-│   ├── ivolve/                      app chart: frontend, auth, roadmap, mysql, service accounts, network policies
-│   │   ├── values.yaml              defaults (ports, replicas, limits, Vault templates; registry/imageTag empty)
-│   │   └── values-{dev,stg,prod}.yaml   environment name + imageTag (Jenkins rewrites imageTag)
-│   ├── vault/                       values.yaml (KMS auto-unseal) + setup.sh (init, auth, policy, secrets)
-│   ├── monitoring/values.yaml       kube-prometheus-stack overrides
-│   └── gp3-storageclass.yaml        default StorageClass for the EBS CSI driver
-├── terraform/
-│   ├── main.tf provider.tf variables.tf outputs.tf
-│   ├── terraform.tfvars.example  backend.hcl.example     (real files are git-ignored)
-│   └── modules/{network,ec2,ecr,eks}/
-├── ansible/
-│   ├── ansible.cfg inventory.aws_ec2.yml playbook.yml
-│   └── roles/{jenkins,docker,trivy}/
-└── app/
-    ├── frontend/  auth-service/  roadmap-service/    (each has its own Dockerfile)
-    └── docker-compose.yaml
-```
-
----
-
-## 9. Component reference
-
-### Terraform
-
-| Module | Creates | Notable settings |
-| --- | --- | --- |
-| network | VPC, 2 public + 2 private subnets (`cidrsubnet(vpc, 8, i)`), IGW, 1 NAT + EIP, route tables, permissive NACL | subnets tagged for ELB discovery |
-| ec2 | the one Jenkins instance (AL2023 via SSM parameter), security group, IAM role `AmazonEC2ContainerRegistryPowerUser`, instance profile | `t3.small`, 30 GiB encrypted gp3 root disk, IMDSv2 required, SSH and Jenkins UI (8080) only from `ssh_cidr_blocks`, tag `Name=<project>-ec2-instance` |
-| ecr | one repo per name passed in (`<service>-<env>`) | scan on push, AES256, MUTABLE, `force_delete=false` |
-| eks | cluster, node group (fixed 2 nodes, ON_DEMAND), IAM roles, add-ons (vpc-cni with network policy, pod identity agent, EBS CSI), Vault KMS key + role + Pod Identity association | private + public endpoint |
-
-### Ansible ([playbook.yml](ansible/playbook.yml))
-
-The inventory (`amazon.aws.aws_ec2`) matches the tag `Name=ivolve-ec2-instance` in state `running`. Terraform makes exactly one such instance, so Ansible finds exactly the Jenkins host. The playbook updates all packages, then runs roles:
-
-* `jenkins`: git, Corretto 21, Jenkins stable repo + GPG key, install, enable.
-* `docker`: install, enable, add `jenkins` to the `docker` group, restart Jenkins to apply it.
-* `trivy`: installs release rpm 0.58.0 (GPG check disabled because the rpm is unsigned).
-
-### Helm values you will change most
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `registry` | empty | ECR registry host; set by the Argo Application parameter |
-| `environment` | empty | `dev`, `stg` or `prod`; set in `values-<env>.yaml` |
-| `imageTag` | empty | build number; Jenkins rewrites it in `values-<env>.yaml` |
-| `*.replicas` | 2 (1 in dev and stg) | frontend, auth, roadmap |
-| `*.resources` | see section 5 | requests and limits |
-| `frontend.sessionAffinitySeconds` | 3600 | sticky window for the frontend Service |
-| `networkPolicy.enabled` | `true` | ingress isolation |
-| `vault.enabled` | `true` | turn off to skip the injector annotations |
-
----
-
-## 10. What stays out of git
+## What stays out of git
 
 | Item | Where it lives instead |
 | --- | --- |
-| Your public IP (SSH and EKS API allow-list) | `terraform/terraform.tfvars` (git-ignored); template in `terraform.tfvars.example` |
-| AWS account ID in the state bucket name | `terraform/backend.hcl` (git-ignored); template in `backend.hcl.example` |
-| AWS account ID in the registry host (Jenkins) | computed at run time by `aws sts get-caller-identity` |
-| AWS account ID in the registry host (Argo/Helm) | Argo Application parameter `registry=${ECR_REGISTRY}`, filled by `envsubst` when you `kubectl apply`; `values.yaml` has `registry: ""` |
+| Your public IP (SSH and EKS API allow-list) | `terraform/terraform.tfvars` (git-ignored); template `terraform.tfvars.example` |
+| AWS account ID in the state bucket name | `terraform/backend.hcl` (git-ignored); template `backend.hcl.example` |
+| AWS account ID in the registry host | Jenkins: `aws sts get-caller-identity` at run time. Argo: `registry=${ECR_REGISTRY}` via `envsubst` |
 | Vault root token and recovery keys | `helm/vault/vault-init.json` (git-ignored) |
 | DB passwords, session secret | Vault |
 | GitHub token for the `imageTag` push | Jenkins credential `github-https` |
 | Terraform state | S3 (`*.tfstate` also git-ignored) |
 
-The git history was recreated from scratch, so no earlier commit contains the IP or account ID.
+## Decisions and lessons
 
----
+* **Jenkins never touches the cluster.** It builds, scans, pushes and edits `imageTag`. Argo CD deploys, so cluster credentials never sit on the CI host.
+* **Branch per environment.** `dev`, `stg`, `prod` each hold their own `imageTag`; promotion is a branch and a build, and prod needs a manual sync.
+* **Trivy is report-only, on purpose.** Exit code 0 with `--ignore-unfixed --severity HIGH,CRITICAL`. With a blocking exit code, unfixed base-image CVEs failed every build. The trade-off: findings are logged, not enforced.
+* **Build history (stage view above).**
+  * #1-#2 failed at Build: the `jenkins` user had no Docker socket permission. Fix: add it to the `docker` group, now done in the Ansible `docker` role, which also restarts Jenkins.
+  * #3-#4 failed at Test: the Trivy Java DB overflowed the 2 GiB RAM-backed `/tmp` on the host, and the exit code was blocking. Fix: `TMPDIR=$HOME/trivy-tmp` and `--exit-code 0`.
+  * #5 passed end to end in about 1 minute.
 
-## 11. Deployment runbook
+## Deployment runbook
 
-Prerequisites: AWS CLI with credentials, Terraform >= 1.10, Ansible with the `amazon.aws` collection, `kubectl`, `helm`, `jq`, `envsubst`, an EC2 key pair named `ivolve-key`, and the S3 state bucket.
+Prerequisites: AWS CLI, Terraform >= 1.10, Ansible with `amazon.aws`, `kubectl`, `helm`, `jq`, `envsubst`, EC2 key pair `ivolve-key`, the S3 state bucket.
 
-1. **Commit and publish the branches.** Commit the work on `main`, then merge `main` into `dev`, `stg` and `prod` and push all four (`git push -u origin main dev stg prod`). Argo and Jenkins read these branches from GitHub.
-2. **Infrastructure** (one apply, one stack)
+1. **Publish branches.** Merge `main` into `dev`, `stg`, `prod` and run `git push -u origin main dev stg prod`.
+2. **Infrastructure**
    ```bash
    cd terraform
    cp terraform.tfvars.example terraform.tfvars      # put your IP in
@@ -478,7 +213,7 @@ Prerequisites: AWS CLI with credentials, Terraform >= 1.10, Ansible with the `am
    ```bash
    cd ansible && ansible-playbook playbook.yml
    ```
-   Then open `http://<jenkins_public_ip>:8080` (reachable only from your IP) and in Jenkins: install the Pipeline, Git and Credentials Binding plugins, add the `github-https` credential (username + GitHub token with push rights), register the library (name `ivolve-shared-library`, this repo over https, default version `main`, path `jenkins/shared-library`), and create a pipeline job from this repo's `Jenkinsfile`.
+   Open `http://<jenkins_public_ip>:8080`. Install the Pipeline, Git and Credentials Binding plugins, add credential `github-https` (username + GitHub token with push rights), register the library (name `ivolve-shared-library`, this repo over https, default version `main`, path `jenkins/shared-library`), create a pipeline job from this repo's `Jenkinsfile`.
 4. **Cluster access and storage**
    ```bash
    aws eks update-kubeconfig --region eu-west-1 --name $(terraform -chdir=terraform output -raw eks_cluster_name)
@@ -498,21 +233,19 @@ Prerequisites: AWS CLI with credentials, Terraform >= 1.10, Ansible with the `am
    helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring \
      --create-namespace -f helm/monitoring/values.yaml --set grafana.adminPassword=...
    ```
-7. **Lint the chart** before Argo can sync it (needs helm; it was not linted where it was written)
-   ```bash
-   export ECR_REGISTRY=<account-id>.dkr.ecr.eu-west-1.amazonaws.com
-   helm lint helm/ivolve -f helm/ivolve/values-dev.yaml --set registry=$ECR_REGISTRY
-   helm template ivolve helm/ivolve -f helm/ivolve/values-dev.yaml --set registry=$ECR_REGISTRY > /dev/null
-   ```
-8. **Argo CD** (install command is the upstream one; it is not stored in this repo)
+7. **Argo CD** (upstream install, not stored in this repo)
    ```bash
    kubectl create namespace argocd
    kubectl apply -n argocd --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
    for e in dev stg prod; do envsubst < argo/applications/ivolve-$e.yaml | kubectl apply -f -; done
    ```
-9. **First release**: run the Jenkins job with `ENV=dev`, then `stg`, then `prod`. Each run pushes `*-<env>:<build>` and updates `values-<env>.yaml`. Argo syncs dev and stg itself; sync prod by hand in the Argo UI or `argocd app sync ivolve-prod`.
-10. **Get a URL**
+8. **First release.** Run the Jenkins job with `ENV=dev`, then `stg`, then `prod`. Argo syncs dev and stg itself; sync prod with the Argo UI or `argocd app sync ivolve-prod`.
+9. **Get a URL and open Grafana**
    ```bash
    kubectl -n ivolve-dev get svc frontend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+   kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
    ```
-11. **Grafana**: `kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80`.
+
+## Repository layout
+
+`Jenkinsfile` and `jenkins/shared-library/vars/` (pipeline), `argo/applications/` (3 Applications), `helm/{ivolve,vault,monitoring}` plus `gp3-storageclass.yaml`, `terraform/modules/{network,ec2,ecr,eks}`, `ansible/roles/{jenkins,docker,trivy}`, `app/{frontend,auth-service,roadmap-service}` with `docker-compose.yaml`, `docs/` (site and images).
