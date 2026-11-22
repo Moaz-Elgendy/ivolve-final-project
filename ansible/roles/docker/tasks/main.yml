@@ -17,3 +17,7 @@
     append: true
   loop: "{{ docker_users }}"
   notify: Restart Jenkins if present
+
+# Restart now, not at play end, so a later failing role cannot skip it
+- name: Apply docker group to running Jenkins
+  ansible.builtin.meta: flush_handlers

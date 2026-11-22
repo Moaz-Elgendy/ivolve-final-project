@@ -27,14 +27,14 @@ done
 $V vault status >/dev/null
 
 ROOT=$(jq -r .root_token helm/vault/vault-init.json)
-VL="kubectl -n $NS exec -i -e VAULT_TOKEN=$ROOT vault-0 -- vault"
+VL="kubectl -n $NS exec -i vault-0 -- env VAULT_TOKEN=$ROOT vault"
 
 # 3. KV v2 secrets engine at secret/
 $VL secrets enable -path=secret kv-v2 || true
 
 # 4. Kubernetes auth: Vault verifies pod ServiceAccount tokens against the cluster API
 $VL auth enable kubernetes || true
-kubectl -n $NS exec -i -e VAULT_TOKEN=$ROOT vault-0 -- sh -c \
+kubectl -n $NS exec -i vault-0 -- env VAULT_TOKEN=$ROOT sh -c \
   'vault write auth/kubernetes/config kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443"'
 
 # 5. Policy: read-only on secret/ivolve/*

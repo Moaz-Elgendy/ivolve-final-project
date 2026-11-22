@@ -507,7 +507,7 @@ Prerequisites: AWS CLI with credentials, Terraform >= 1.10, Ansible with the `am
 8. **Argo CD** (install command is the upstream one; it is not stored in this repo)
    ```bash
    kubectl create namespace argocd
-   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   kubectl apply -n argocd --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
    for e in dev stg prod; do envsubst < argo/applications/ivolve-$e.yaml | kubectl apply -f -; done
    ```
 9. **First release**: run the Jenkins job with `ENV=dev`, then `stg`, then `prod`. Each run pushes `*-<env>:<build>` and updates `values-<env>.yaml`. Argo syncs dev and stg itself; sync prod by hand in the Argo UI or `argocd app sync ivolve-prod`.

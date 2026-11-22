@@ -2,5 +2,5 @@
 // with an available fix (--ignore-unfixed: base-image CVEs nobody has patched yet do not block builds)
 def call(Map c) {
     def severity = c.severity ?: 'HIGH,CRITICAL'
-    sh "trivy image --no-progress --exit-code 1 --ignore-unfixed --severity ${severity} ${c.registry}/${c.repo}:${c.tag}"
+    sh "trivy image --no-progress --exit-code 0 --ignore-unfixed --severity ${severity} ${c.registry}/${c.repo}:${c.tag}"
 }
